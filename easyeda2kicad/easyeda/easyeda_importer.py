@@ -120,6 +120,7 @@ class EasyedaSymbolImporter:
         new_ee_symbol = EeSymbol(
             info=EeSymbolInfo(
                 name=ee_data_info["name"],
+                value=ee_data_info.get("Value", ee_data_info["name"]),
                 prefix=ee_data_info["pre"],
                 package=ee_data_info.get("package", None),
                 manufacturer=ee_data_info.get("BOM_Manufacturer", None),

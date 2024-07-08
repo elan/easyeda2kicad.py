@@ -126,7 +126,7 @@ class KiExportConfigV6(Enum):
     PIN_NAME_SIZE = 1.27
     DEFAULT_BOX_LINE_WIDTH = 0
     PROPERTY_FONT_SIZE = 1.27
-    FIELD_OFFSET_START = 5.08
+    FIELD_OFFSET_START = 2.54
     FIELD_OFFSET_INCREMENT = 2.54
 
 
@@ -135,11 +135,13 @@ class KiExportConfigV6(Enum):
 class KiSymbolInfo:
     name: str
     prefix: str
+    value: str
     package: str
     manufacturer: str
     datasheet: str
     lcsc_id: str
     jlc_id: str
+    keywords: str
     y_low: Union[int, float] = 0
     y_high: Union[int, float] = 0
 
@@ -238,7 +240,7 @@ class KiSymbolInfo:
             ),
             property_template.format(
                 key="Value",
-                value=self.name,
+                value=self.value,
                 id_=1,
                 pos_y=self.y_low - field_offset_y,
                 font_size=KiExportConfigV6.PROPERTY_FONT_SIZE.value,
@@ -638,10 +640,14 @@ class KiSymbol:
         sym_pins = sym_export_data.pop("pins")
         sym_graphic_items = itertools.chain.from_iterable(sym_export_data.values())
 
+        pins_with_real_names = any(pin.name != "~" for pin in self.pins)
+        pin_hide = "(pin_numbers hide)" if not pins_with_real_names else ""
+
         return textwrap.indent(
             textwrap.dedent(
                 """
             (symbol "{library_id}"
+              {pin_hide}
               (in_bom yes)
               (on_board yes)
               {symbol_properties}
@@ -661,6 +667,7 @@ class KiSymbol:
                 textwrap.dedent("".join(sym_graphic_items)), "  " * 3
             ),
             pins=textwrap.indent(textwrap.dedent("".join(sym_pins)), "  " * 3),
+            pin_hide=pin_hide
         )
 
     def export(self, kicad_version: KicadVersion) -> str:

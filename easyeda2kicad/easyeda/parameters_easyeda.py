@@ -285,6 +285,7 @@ class EeSymbolPath(BaseModel):
 class EeSymbolInfo:
     name: str = ""
     prefix: str = ""
+    value: str = ""
     package: str = ""
     manufacturer: str = ""
     datasheet: str = ""

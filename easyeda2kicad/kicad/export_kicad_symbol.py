@@ -51,10 +51,15 @@ def convert_ee_pins(
     kicad_pins = []
     for ee_pin in ee_pins:
         pin_length = abs(int(float(ee_pin.pin_path.path.split("h")[-1])))
+        pin_number = ee_pin.settings.spice_pin_number.replace(" ", "")
+        pin_name = ee_pin.name.text.replace(" ", "")
+
+        if pin_number == pin_name:
+            pin_name = "~"
 
         ki_pin = KiSymbolPin(
-            name=ee_pin.name.text.replace(" ", ""),
-            number=ee_pin.settings.spice_pin_number.replace(" ", ""),
+            name=pin_name,
+            number=pin_number,
             style=KiPinStyle.line,
             length=to_ki(pin_length),
             type=ee_pin_type_to_ki_pin_type[ee_pin.settings.type],
@@ -81,6 +86,12 @@ def convert_ee_pins(
         #     ki_pin.pos_y += to_ki(pin_length) - pin_spacing
 
         kicad_pins.append(ki_pin)
+
+    # If all pins are unspecified and there are fewew than 4 pins, set them to passive.
+    if all(pin.type == KiPinType.unspecified for pin in kicad_pins) or len(kicad_pins) < 4:
+        print("Setting pins to passive.")
+        for pin in kicad_pins:
+            pin.type = KiPinType.passive
 
     return kicad_pins
 
@@ -296,16 +307,43 @@ def convert_ee_paths(
     return kicad_polygons, kicad_beziers
 
 
+def extract_keywords(ee_symbol: EeSymbol):
+    if not ee_symbol.info.datasheet:
+        return ''
+
+    # Split the URL into components
+    components = re.split('-|_', ee_symbol.info.datasheet)
+
+    # Define the fixed set and voltage pattern
+    fixed_set = set({'MLCC'})
+
+    # Compile the patterns into regular expressions
+    compiled_patterns = [re.compile(pattern) for pattern in [r'^\d+V$']]
+
+    # Filter components based on the criteria
+    extracted_members = [
+        component for component in components
+        if component in fixed_set or any(pattern.match(component) for pattern in compiled_patterns)
+    ]
+
+    # Add value and package.
+    extracted_members.append(ee_symbol.info.value)
+
+    return ' '.join(extracted_members)
+
 def convert_to_kicad(ee_symbol: EeSymbol, kicad_version: KicadVersion) -> KiSymbol:
 
+    print(extract_keywords(ee_symbol))
     ki_info = KiSymbolInfo(
         name=ee_symbol.info.name,
+        value=ee_symbol.info.value,
         prefix=ee_symbol.info.prefix.replace("?", ""),
         package=ee_symbol.info.package,
         manufacturer=ee_symbol.info.manufacturer,
         datasheet=ee_symbol.info.datasheet,
         lcsc_id=ee_symbol.info.lcsc_id,
         jlc_id=ee_symbol.info.jlc_id,
+        keywords=extract_keywords(ee_symbol),
     )
 
     kicad_symbol = KiSymbol(
