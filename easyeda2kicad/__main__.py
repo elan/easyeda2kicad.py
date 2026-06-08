@@ -17,6 +17,7 @@ from easyeda2kicad.easyeda.easyeda_importer import (
 from easyeda2kicad.easyeda.parameters_easyeda import EeSymbol
 from easyeda2kicad.helpers import (
     add_component_in_symbol_lib_file,
+    find_symbol_by_lcsc_id,
     get_local_config,
     id_already_in_symbol_lib,
     set_logger,
@@ -61,6 +62,13 @@ def get_parser() -> argparse.ArgumentParser:
         "--full",
         help="Get the symbol, footprint and 3d model of this id",
         required=False,
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--check",
+        required=False,
+        help="Check whether this id is already in the library (no download)",
         action="store_true",
     )
 
@@ -197,6 +205,82 @@ def valid_arguments(arguments: dict) -> bool:
     return True
 
 
+def resolve_lib_base(arguments: dict) -> str:
+    """Resolve the library base path (no extension) without creating anything.
+
+    Mirrors the path logic in valid_arguments but is side-effect free, so it is
+    safe to use for read-only operations such as --check.
+    """
+    if arguments["output"]:
+        base_folder = "/".join(arguments["output"].replace("\\", "/").split("/")[:-1])
+        lib_name = (
+            arguments["output"]
+            .replace("\\", "/")
+            .split("/")[-1]
+            .split(".lib")[0]
+            .split(".kicad_sym")[0]
+        )
+    else:
+        base_folder = os.path.join(
+            os.path.expanduser("~"), "Documents", "Kicad", "easyeda2kicad"
+        )
+        lib_name = "easyeda2kicad"
+    return f"{base_folder}/{lib_name}"
+
+
+def check_component(arguments: dict) -> int:
+    """Report whether a part's symbol, footprint and 3D model are already present.
+
+    Returns 0 if the part's symbol is in the library, 1 otherwise (so it doubles
+    as a scriptable exit status).
+    """
+    component_id = arguments["lcsc_id"]
+    kicad_version = arguments["kicad_version"]
+    sym_lib_ext = "kicad_sym" if kicad_version == KicadVersion.v6 else "lib"
+    output = resolve_lib_base(arguments)
+    sym_lib_path = f"{output}.{sym_lib_ext}"
+
+    # 1. Authoritative, offline lookup of the symbol by its LCSC id.
+    found = find_symbol_by_lcsc_id(
+        lib_path=sym_lib_path,
+        lcsc_id=component_id,
+        kicad_version=kicad_version,
+    )
+    if not found:
+        logging.info(f"{component_id} is NOT in the library ({sym_lib_path})")
+        return 1
+
+    symbol_name, footprint_name = found
+
+    # 2. The footprint file is named after the package, read off the symbol.
+    footprint_path = (
+        f"{output}.pretty/{footprint_name}.kicad_mod" if footprint_name else None
+    )
+    footprint_present = bool(footprint_path) and os.path.isfile(footprint_path)
+
+    # 3. The 3D model is named independently of the footprint, so resolve it from
+    #    the footprint's own (model ...) reference rather than guessing the name.
+    model_name = None
+    model_present = False
+    if footprint_present:
+        with open(footprint_path, encoding="utf-8") as fp_file:
+            model_match = re.search(r'\(model "([^"]+)"', fp_file.read())
+        if model_match:
+            model_name = os.path.splitext(os.path.basename(model_match.group(1)))[0]
+            model_present = os.path.isfile(
+                f"{output}.3dshapes/{model_name}.wrl"
+            ) or os.path.isfile(f"{output}.3dshapes/{model_name}.step")
+
+    mark = lambda present: "present" if present else "missing"  # noqa: E731
+    logging.info(
+        f"{component_id} is in the library ({sym_lib_path})\n"
+        f"       Symbol    : present ({symbol_name})\n"
+        f"       Footprint : {mark(footprint_present)} ({footprint_name or 'unknown name'})\n"
+        f"       3D model  : {mark(model_present)} ({model_name or 'unknown name'})"
+    )
+    return 0
+
+
 def delete_component_in_symbol_lib(
     lib_path: str, component_id: str, component_name: str
 ) -> None:
@@ -235,6 +319,17 @@ def main(argv: List[str] = sys.argv[1:]) -> int:
         set_logger(log_file=None, log_level=logging.DEBUG)
     else:
         set_logger(log_file=None, log_level=logging.INFO)
+
+    # --check is read-only: resolve the kicad version and report presence without
+    # touching the filesystem or hitting the network, then exit early.
+    if arguments["check"]:
+        if not arguments["lcsc_id"].startswith("C"):
+            logging.error("lcsc_id should start by C....")
+            return 1
+        arguments["kicad_version"] = (
+            KicadVersion.v5 if arguments.get("v5") else KicadVersion.v6
+        )
+        return check_component(arguments)
 
     if not valid_arguments(arguments=arguments):
         return 1

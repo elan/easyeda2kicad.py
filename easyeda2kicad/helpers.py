@@ -64,6 +64,62 @@ def id_already_in_symbol_lib(
     return False
 
 
+# Regex locating a part's LCSC id field inside a symbol lib, keyed by kicad version.
+# v5 stores it as `F6 "C123"`, v6 as a `"LCSC Part"` property whose value is the id.
+# v6 must tolerate both layouts the value appears in: the script emits key and value
+# on separate lines, but KiCad re-normalizes on save to a single line — so `\s+`
+# (any run of spaces/newlines/tabs) sits between them either way.
+lcsc_id_field_pattern = {
+    "v5": r'F6 "{lcsc_id}"',
+    "v6": r'"LCSC Part"\s+"{lcsc_id}"',
+}
+
+
+def find_symbol_by_lcsc_id(
+    lib_path: str, lcsc_id: str, kicad_version: KicadVersion
+):
+    """Look up a symbol by its LCSC id and return (symbol_name, footprint_name).
+
+    Returns None when no symbol carries this LCSC id. footprint_name is None when
+    the symbol has no footprint field. The lookup is fully offline.
+    """
+    # 1. Bail out early if the lib file does not even exist yet.
+    if not os.path.isfile(lib_path):
+        return None
+
+    with open(lib_path, encoding="utf-8") as lib_file:
+        lib = lib_file.read()
+
+    # 2. Find the LCSC id field; its absence means the part is not in the lib.
+    match = re.search(
+        lcsc_id_field_pattern[kicad_version.name].format(
+            lcsc_id=sanitize_for_regex(lcsc_id)
+        ),
+        lib,
+    )
+    if not match:
+        return None
+
+    # 3. The symbol's own name/footprint fields are the nearest ones *preceding*
+    #    the LCSC field, so scan only the text before it and take the last hit.
+    head = lib[: match.start()]
+    if kicad_version == KicadVersion.v6:
+        # Top-level symbols sit at one indent unit (one tab or two spaces); their
+        # nested sub-symbols ("name_0_1") sit deeper, so anchoring to exactly one
+        # tab / two spaces after a newline skips the children. Footprint matching
+        # tolerates single- and multi-line layouts (see lcsc_id_field_pattern).
+        names = re.findall(r'\n(?:\t|  )\(symbol "([^"]+)"', head)
+        footprints = re.findall(r'"Footprint"\s+"([^"]+)"', head)
+    else:
+        names = re.findall(r"\nDEF (\S+) ", head)
+        footprints = re.findall(r'F2 "([^"]+)"', head)
+
+    symbol_name = names[-1] if names else lcsc_id
+    # Footprint fields are stored as "lib:name"; keep just the file-name part.
+    footprint_name = footprints[-1].split(":")[-1] if footprints else None
+    return symbol_name, footprint_name
+
+
 def update_component_in_symbol_lib_file(
     lib_path: str,
     component_name: str,
