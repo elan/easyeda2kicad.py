@@ -120,6 +120,77 @@ def find_symbol_by_lcsc_id(
     return symbol_name, footprint_name
 
 
+# Per-version regexes pulling a symbol's searchable metadata. Each has one capture
+# group; v6 tolerates single- and multi-line layouts via \s+ (see lcsc_id_field_pattern).
+symbol_field_patterns = {
+    "v6": {
+        "lcsc_id": r'"LCSC Part"\s+"([^"]+)"',
+        "value": r'"Value"\s+"([^"]+)"',
+        "description": r'"Description"\s+"([^"]+)"',
+        "manufacturer": r'"Manufacturer"\s+"([^"]+)"',
+    },
+    "v5": {
+        "lcsc_id": r'F6 "([^"]+)"',
+        "value": r'F1 "([^"]+)"',
+        "description": r'F3 "([^"]+)"',
+        "manufacturer": r'F4 "([^"]+)"',
+    },
+}
+
+
+def _extract_symbol_fields(block: str, kicad_version: KicadVersion) -> dict:
+    """Pull the searchable metadata fields out of a single symbol's text block."""
+    fields = {}
+    for key, pattern in symbol_field_patterns[kicad_version.name].items():
+        found = re.search(pattern, block)
+        fields[key] = found.group(1) if found else None
+    return fields
+
+
+def search_symbol_lib(
+    lib_path: str, query: str, kicad_version: KicadVersion
+) -> list:
+    """Search the symbol lib for parts matching `query`.
+
+    Matching is a case-insensitive substring test over each symbol's name, value,
+    description, manufacturer and LCSC id. Returns a list of dicts
+    {name, lcsc_id, value, description, manufacturer}. Fully offline; returns [] if
+    the lib does not exist.
+    """
+    if not os.path.isfile(lib_path):
+        return []
+
+    with open(lib_path, encoding="utf-8") as lib_file:
+        lib = lib_file.read()
+
+    needle = query.lower()
+
+    # 1. Carve the lib into one text block per top-level symbol. v6 symbols are bounded
+    #    by their (symbol "...") declarations (children sit deeper and stay inside the
+    #    parent's slice); v5 symbols are bounded by DEF .. ENDDEF.
+    if kicad_version == KicadVersion.v6:
+        starts = [m.start() for m in re.finditer(r'\n(?:\t|  )\(symbol "[^"]+"', lib)]
+        blocks = [lib[a:b] for a, b in zip(starts, starts[1:] + [len(lib)])]
+        name_pattern = r'\(symbol "([^"]+)"'
+    else:
+        blocks = re.findall(r"\nDEF .*?ENDDEF", lib, flags=re.DOTALL)
+        name_pattern = r"DEF (\S+) "
+
+    # 2. For each symbol, match the query against its name and metadata fields.
+    results = []
+    for block in blocks:
+        name_match = re.search(name_pattern, block)
+        if not name_match:
+            continue
+        name = name_match.group(1)
+        fields = _extract_symbol_fields(block, kicad_version)
+        haystack = [name, fields["value"], fields["description"], fields["manufacturer"], fields["lcsc_id"]]
+        if any(field and needle in field.lower() for field in haystack):
+            results.append({"name": name, **fields})
+
+    return results
+
+
 def update_component_in_symbol_lib_file(
     lib_path: str,
     component_name: str,

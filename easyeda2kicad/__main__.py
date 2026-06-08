@@ -20,6 +20,7 @@ from easyeda2kicad.helpers import (
     find_symbol_by_lcsc_id,
     get_local_config,
     id_already_in_symbol_lib,
+    search_symbol_lib,
     set_logger,
     update_component_in_symbol_lib_file,
 )
@@ -38,7 +39,13 @@ def get_parser() -> argparse.ArgumentParser:
         )
     )
 
-    parser.add_argument("--lcsc_id", help="LCSC id", required=True, type=str)
+    parser.add_argument(
+        "--lcsc_id",
+        help="LCSC id (required for conversion and --check)",
+        required=False,
+        default="",
+        type=str,
+    )
 
     parser.add_argument(
         "--symbol", help="Get symbol of this id", required=False, action="store_true"
@@ -70,6 +77,17 @@ def get_parser() -> argparse.ArgumentParser:
         required=False,
         help="Check whether this id is already in the library (no download)",
         action="store_true",
+    )
+
+    parser.add_argument(
+        "--search",
+        required=False,
+        metavar="QUERY",
+        help=(
+            "Search the local library for a part by name, value, description,"
+            " manufacturer or LCSC id (no download)"
+        ),
+        type=str,
     )
 
     parser.add_argument(
@@ -281,6 +299,36 @@ def check_component(arguments: dict) -> int:
     return 0
 
 
+def search_component(arguments: dict) -> int:
+    """List local-library parts matching a free-text query.
+
+    Returns 0 if at least one part matches, 1 otherwise (scriptable exit status).
+    """
+    query = arguments["search"]
+    kicad_version = arguments["kicad_version"]
+    sym_lib_ext = "kicad_sym" if kicad_version == KicadVersion.v6 else "lib"
+    output = resolve_lib_base(arguments)
+    sym_lib_path = f"{output}.{sym_lib_ext}"
+
+    matches = search_symbol_lib(
+        lib_path=sym_lib_path, query=query, kicad_version=kicad_version
+    )
+    if not matches:
+        logging.info(f"No parts matching '{query}' in {sym_lib_path}")
+        return 1
+
+    # Lay each hit out as "<lcsc_id>  <name>  <value>" so the id column lines up.
+    lines = [f"Found {len(matches)} part(s) matching '{query}' in {sym_lib_path}:"]
+    for part in matches:
+        value = part.get("value")
+        lines.append(
+            f"       {part.get('lcsc_id') or '-':<10} {part['name']}"
+            + (f"  [{value}]" if value and value != part["name"] else "")
+        )
+    logging.info("\n".join(lines))
+    return 0
+
+
 def delete_component_in_symbol_lib(
     lib_path: str, component_id: str, component_name: str
 ) -> None:
@@ -320,16 +368,32 @@ def main(argv: List[str] = sys.argv[1:]) -> int:
     else:
         set_logger(log_file=None, log_level=logging.INFO)
 
-    # --check is read-only: resolve the kicad version and report presence without
-    # touching the filesystem or hitting the network, then exit early.
+    # --search and --check are read-only: they resolve the kicad version and report
+    # against the existing lib without touching the filesystem or hitting the network.
+    if arguments["search"] or arguments["check"]:
+        arguments["kicad_version"] = (
+            KicadVersion.v5 if arguments.get("v5") else KicadVersion.v6
+        )
+
+    # --search needs no lcsc_id; it queries the whole library by free text.
+    if arguments["search"]:
+        return search_component(arguments)
+
     if arguments["check"]:
         if not arguments["lcsc_id"].startswith("C"):
             logging.error("lcsc_id should start by C....")
             return 1
-        arguments["kicad_version"] = (
-            KicadVersion.v5 if arguments.get("v5") else KicadVersion.v6
-        )
         return check_component(arguments)
+
+    # Conversion requires an lcsc_id (no longer enforced by argparse so --search can
+    # run standalone), so guard it before the path-building in valid_arguments.
+    if not arguments["lcsc_id"]:
+        logging.error(
+            "Missing --lcsc_id\n"
+            "  easyeda2kicad --lcsc_id=C2040 --full\n"
+            "  easyeda2kicad --search ES1JW"
+        )
+        return 1
 
     if not valid_arguments(arguments=arguments):
         return 1
